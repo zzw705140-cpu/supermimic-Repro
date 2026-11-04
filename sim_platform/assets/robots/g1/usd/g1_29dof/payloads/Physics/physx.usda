@@ -1,0 +1,284 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.6.1"
+    }
+    defaultPrim = "g1_29dof_rev_1_0"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    subLayers = [
+        @./physics.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "g1_29dof_rev_1_0"
+{
+    over "Geometry"
+    {
+        over "pelvis"
+        {
+            over "left_hip_pitch_link"
+            {
+                over "left_hip_roll_link"
+                {
+                    over "left_hip_yaw_link"
+                    {
+                        over "left_knee_link"
+                        {
+                            over "left_ankle_pitch_link"
+                            {
+                                over "left_ankle_roll_link"
+                                {
+                                    over "left_ankle_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                    }
+                                }
+
+                                over "left_ankle_pitch_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                }
+                            }
+
+                            over "left_knee_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                            }
+                        }
+
+                        over "left_hip_yaw_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                        }
+                    }
+
+                    over "left_hip_roll_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                    }
+                }
+
+                over "left_hip_pitch_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                }
+            }
+
+            over "right_hip_pitch_link"
+            {
+                over "right_hip_roll_link"
+                {
+                    over "right_hip_yaw_link"
+                    {
+                        over "right_knee_link"
+                        {
+                            over "right_ankle_pitch_link"
+                            {
+                                over "right_ankle_roll_link"
+                                {
+                                    over "right_ankle_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                    }
+                                }
+
+                                over "right_ankle_pitch_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                }
+                            }
+
+                            over "right_knee_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                            }
+                        }
+
+                        over "right_hip_yaw_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                        }
+                    }
+
+                    over "right_hip_roll_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                    }
+                }
+
+                over "right_hip_pitch_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                }
+            }
+
+            over "waist_yaw_link"
+            {
+                over "waist_roll_link"
+                {
+                    over "torso_link"
+                    {
+                        over "left_shoulder_pitch_link"
+                        {
+                            over "left_shoulder_roll_link"
+                            {
+                                over "left_shoulder_yaw_link"
+                                {
+                                    over "left_elbow_link"
+                                    {
+                                        over "left_wrist_roll_link"
+                                        {
+                                            over "left_wrist_pitch_link"
+                                            {
+                                                over "left_wrist_yaw_link"
+                                                {
+                                                    over "left_wrist_yaw_joint" (
+                                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                                    )
+                                                    {
+                                                    }
+                                                }
+
+                                                over "left_wrist_pitch_joint" (
+                                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                                )
+                                                {
+                                                }
+                                            }
+
+                                            over "left_wrist_roll_joint" (
+                                                prepend apiSchemas = ["PhysxJointAPI"]
+                                            )
+                                            {
+                                            }
+                                        }
+
+                                        over "left_elbow_joint" (
+                                            prepend apiSchemas = ["PhysxJointAPI"]
+                                        )
+                                        {
+                                        }
+                                    }
+
+                                    over "left_shoulder_yaw_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                    }
+                                }
+
+                                over "left_shoulder_roll_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                }
+                            }
+
+                            over "left_shoulder_pitch_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                            }
+                        }
+
+                        over "right_shoulder_pitch_link"
+                        {
+                            over "right_shoulder_roll_link"
+                            {
+                                over "right_shoulder_yaw_link"
+                                {
+                                    over "right_elbow_link"
+                                    {
+                                        over "right_wrist_roll_link"
+                                        {
+                                            over "right_wrist_pitch_link"
+                                            {
+                                                over "right_wrist_yaw_link"
+                                                {
+                                                    over "right_wrist_yaw_joint" (
+                                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                                    )
+                                                    {
+                                                    }
+                                                }
+
+                                                over "right_wrist_pitch_joint" (
+                                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                                )
+                                                {
+                                                }
+                                            }
+
+                                            over "right_wrist_roll_joint" (
+                                                prepend apiSchemas = ["PhysxJointAPI"]
+                                            )
+                                            {
+                                            }
+                                        }
+
+                                        over "right_elbow_joint" (
+                                            prepend apiSchemas = ["PhysxJointAPI"]
+                                        )
+                                        {
+                                        }
+                                    }
+
+                                    over "right_shoulder_yaw_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                    }
+                                }
+
+                                over "right_shoulder_roll_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                }
+                            }
+
+                            over "right_shoulder_pitch_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                            }
+                        }
+
+                        over "waist_pitch_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                        }
+                    }
+
+                    over "waist_roll_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                    }
+                }
+
+                over "waist_yaw_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                }
+            }
+        }
+    }
+}
+

@@ -1,0 +1,20 @@
+<mujoco>
+  <!-- 环境光提供均匀底亮度, 弱漫反射保留机器人轮廓 -->
+  <visual>
+    <headlight ambient=".7 .7 .7" diffuse=".2 .2 .2" specular="0 0 0"/>
+  </visual>
+
+  <!-- RoboForge 同款蓝色棋盘格 -->
+  <asset>
+    <texture name="ground_sky" type="skybox" builtin="gradient" rgb1=".6 .7 .8" rgb2=".3 .4 .5" width="32" height="512"/>
+    <texture name="ground_grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="ground_grid" texture="ground_grid" texrepeat="2 2" texuniform="true" reflectance="0"/>
+  </asset>
+
+  <!-- 仅供状态预览的地面与灯光 -->
+  <worldbody>
+    <geom name="test_floor" type="plane" size="50 50 .01" material="ground_grid" contype="0" conaffinity="0"/>
+    <!-- 平行补光覆盖整个场景, 不随距离衰减, 不产生局部光斑或阴影 -->
+    <light directional="true" pos="0 0 3" dir="0 0 -1" ambient=".15 .15 .15" diffuse=".25 .25 .25" specular="0 0 0" castshadow="false"/>
+  </worldbody>
+</mujoco>

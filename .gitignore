@@ -33,3 +33,6 @@ ENV/
 .idea/
 .vscode/
 .DS_Store
+
+要求/
+dependencies
