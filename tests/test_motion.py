@@ -4,9 +4,11 @@
 """
 
 from pathlib import Path
+import ast
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -14,6 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sim_platform.data.motion import MotionLib
+from sim_platform.data.kinematics import G1Kinematics
 
 
 class MotionLibTest(unittest.TestCase):
@@ -117,6 +120,69 @@ class MotionLibTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 MotionLib(self.path)
             (self.path / "bad.csv").unlink()
+
+    """---------------- 参考身体状态缓存 ----------------"""
+
+    def _make_kinematics(self, dtype=torch.float32):
+        """读取真实 G1 的关节顺序, 选择根部和两条肢体作为缓存输出."""
+        assets = Path(__file__).resolve().parents[1] / "sim_platform/assets/robots/g1"
+        tree = ast.parse((assets / "robot.py").read_text())
+        names = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "G1_JOINT_NAMES" for target in node.targets))
+        return G1Kinematics(assets / "g1_29dof.xml", names, ["pelvis", "left_ankle_roll_link", "right_wrist_yaw_link"], dtype=dtype)
+
+    def test_body_cache_matches_forward(self):
+        """分批缓存与直接正运动学一致, 查询只查表, 修改返回值不污染缓存."""
+        kin = self._make_kinematics()
+        with mock.patch.object(kin, "forward", wraps=kin.forward) as forward:
+            motion = MotionLib(self.path, kinematics=kin, fk_batch_size=13)
+            self.assertEqual(forward.call_count, 6)  # 77 帧分为六批, 包含不满批的最后一批.
+            reference = motion.get_reference([0, 1], [17, 25])
+            self.assertEqual(forward.call_count, 6)
+        base = motion.get_reference([0, 1], [17, 25], include_body=False)
+        self.assertEqual(len(base), 6)
+        expected = kin.forward(**base)
+        self.assertEqual(motion.tracked_bodies, kin.tracked_bodies)
+        for key in expected:
+            torch.testing.assert_close(reference[key], expected[key])
+            self.assertFalse(motion.states[key].requires_grad)
+        self.assertEqual(reference["body_pos"].shape, (2, 3, 3))
+        reference["body_pos"].fill_(-999)
+        torch.testing.assert_close(motion.get_reference([0, 1], [17, 25])["body_pos"], expected["body_pos"])
+
+    def test_body_future_terminal_hold(self):
+        """跨尾部查询保持参考身体位姿, 仅合成帧的身体速度归零, 同时覆盖批量广播."""
+        motion = MotionLib(self.path, kinematics=self._make_kinematics(), fk_batch_size=100)
+        for clips, frames in ((0, 49), ([0, 1], [49, 24]), (0, [49, 49])):
+            future = motion.get_future_reference(clips, frames, 3)
+            last_frame = 50 if isinstance(clips, int) else [50, 25]
+            last = motion.get_reference(clips, last_frame)
+            for key in ("body_pos", "body_rot"):
+                actual_last = last[key].unsqueeze(-3 if key == "body_pos" else -4)
+                torch.testing.assert_close(future[key], actual_last.expand_as(future[key]))
+            for key in ("body_lin_vel", "body_ang_vel"):
+                torch.testing.assert_close(future[key][..., 0, :, :], last[key].expand_as(future[key][..., 0, :, :]))
+                self.assertEqual(torch.count_nonzero(future[key][..., 1:, :, :]).item(), 0)
+        base = motion.get_future_reference(0, 0, 3, include_body=False)
+        self.assertEqual(len(base), 6)
+
+    def test_cache_preserves_kinematics_gradients(self):
+        """参考缓存不建图, 但同一正运动学对象仍能对预测状态反向传播."""
+        kin = self._make_kinematics()
+        motion = MotionLib(self.path, kinematics=kin)
+        base = motion.get_reference(0, 17, include_body=False)
+        base["joint_pos"].requires_grad_()
+        output = kin.forward(**base)
+        output["body_pos"].square().sum().backward()
+        self.assertTrue(torch.isfinite(base["joint_pos"].grad).all())
+        self.assertGreater(torch.count_nonzero(base["joint_pos"].grad).item(), 0)
+
+    def test_invalid_cache_configuration(self):
+        """拒绝不合法批大小和与状态不一致的正运动学浮点类型."""
+        for size in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                MotionLib(self.path, fk_batch_size=size)
+        with self.assertRaises(ValueError):
+            MotionLib(self.path, kinematics=self._make_kinematics(dtype=torch.float64))
 
 
 if __name__ == "__main__":
