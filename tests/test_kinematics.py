@@ -16,7 +16,7 @@ import torch
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
-from sim_platform.data.kinematics import G1Kinematics
+from sim_platform.assets.train_data.kinematics import G1Kinematics
 
 
 class KinematicsTest(unittest.TestCase):

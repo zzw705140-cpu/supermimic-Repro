@@ -16,8 +16,8 @@ import torch
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
-from sim_platform.data.kinematics import G1Kinematics
-from sim_platform.data.motion import BASE_STATE_FIELDS, MotionLib
+from sim_platform.assets.train_data.kinematics import G1Kinematics
+from sim_platform.assets.train_data.motion import BASE_STATE_FIELDS, MotionLib
 from sim_platform.sim.mdp import TrackingMDP, TrackingMDPConfig, flatten_state, invariant_features, normalize_context, unflatten_state
 from sim_platform.wrappers.rotations import heading_matrix, matrix_to_rotation_6d, quaternion_to_matrix, rotation_error_squared
 
@@ -217,7 +217,7 @@ class TrackingMDPTest(unittest.TestCase):
 
     def test_real_motion_integration(self):
         """检查已下载动作经 MotionLib/FK 缓存后能直接用于任务计算."""
-        source = next((PROJECT / "sim_platform/data/lafan1_g1").glob("*.csv"))
+        source = next((PROJECT / "sim_platform/assets/train_data/lafan1_g1").glob("*.csv"))
         with tempfile.TemporaryDirectory() as directory:
             # 只用真实动作开头 64 帧, 避免测试分配整个数据集的缓存.
             raw = np.loadtxt(source, delimiter=",", max_rows=64)

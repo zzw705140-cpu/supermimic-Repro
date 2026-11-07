@@ -13,7 +13,7 @@
 世界模型的监督数据则来自训练期间的仿真交互，由经验池另行管理。
 
 ```python
-from sim_platform.data.motion import MotionLib
+from sim_platform.assets.train_data.motion import MotionLib
 
 motion = MotionLib(control_dt=0.02, device="cpu")
 state = motion.get_reference(clip_id=0, frame_id=0)
@@ -29,7 +29,7 @@ future = motion.get_future_reference(clip_id=[0, 1], frame_id=[0, 10], num_frame
 创建时传入 `G1Kinematics`, 将参考身体状态与根部和关节状态一起缓存:
 
 ```python
-from sim_platform.data.kinematics import G1Kinematics
+from sim_platform.assets.train_data.kinematics import G1Kinematics
 
 # 三项配置由调用方提供: MJCF 路径, CSV 关节顺序, 需要跟踪的连杆名称列表.
 kin = G1Kinematics(mjcf_path, joint_names, tracked_bodies, device="cpu")

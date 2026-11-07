@@ -15,8 +15,8 @@ from scipy.spatial.transform import Rotation
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from sim_platform.data.motion import MotionLib
-from sim_platform.data.kinematics import G1Kinematics
+from sim_platform.assets.train_data.motion import MotionLib
+from sim_platform.assets.train_data.kinematics import G1Kinematics
 
 
 class MotionLibTest(unittest.TestCase):
