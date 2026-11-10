@@ -250,12 +250,20 @@ class TrackingMDP:
         noise = torch.rand(observation.shape, device=self.device, dtype=self.dtype, generator=generator)
         return observation + (2 * noise - 1) * self.obs_noise
 
-    # 将未来多帧参考动作编码并拼接，默认得到 730 维目标
+    # 将未来多帧参考动作编码并拼接，默认得到 730 维目标，告诉策略“接下来应该怎样运动”
     def goal_features(self, clip_id, frame_id, num_frames: int | None = None) -> torch.Tensor:
-        """从下一参考帧起编码 K 帧, 返回 [...,K*73], 超尾速度沿用动作库的置零规则.
-
-        每帧: 当前参考朝向系中的相对位置(3), 姿态(6), 未来自身机体系速度(3+3),
-        关节角(29), 0.1 倍关节速度(29). 不使用实际机器人位置来定义参考目标.
+        """
+        从下一参考帧起编码 K 帧, 返回 [...,K*73], 超尾速度沿用动作库的置零规则.
+        这里的位移相对于当前参考帧的根部位置，不是实际机器人位置
+        位移和姿态用当前参考的水平朝向系表达，速度用未来参考帧自身的机体系表达。
+        
+        单帧目标组成：
+        根部相对当前位置的参考位移   (3),
+        根部参考姿态，6D 表示       (6),
+        根部参考线速度             (3),
+        根部参考角速度             (3),
+        参考关节角                (29),
+        参考关节速度 × 0.1        (29)
         """
 
         count = self.config.goal_frames if num_frames is None else num_frames
@@ -360,6 +368,21 @@ class TrackingMDP:
 
         输出 [...,critic_dim], 默认 14 个跟踪部位时为 184 维; 未来目标由调用方另外拼接.
         context 接收原始物理参数, 本函数内部归一化, 不应提前调用 normalize_context.
+
+        Critic 特征组成：      共184 维：
+        根部高度                  (1),
+        去除水平朝向后的根部姿态     (6),
+        机体系根部线速度            (3),
+        机体系根部角速度            (3),
+        关节角                    (29),
+        关节速度                   (29),
+
+        参考关节角与实际关节角之差   (29),
+        对齐后的身体位置误差        (14 × 3 = 42),
+        根部位置误差               (3),
+        相对参考根部姿态           (6),
+
+        归一化物理参数             (33)
         """
 
         self._check_state(state)
