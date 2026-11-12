@@ -10,8 +10,8 @@ TASK_NAME="tracking"                       # 实验名称中的任务标识
 MOTION_DIR=""                              # 动作数据目录, 留空使用项目默认目录
 DEVICE="cuda:0"                            # 仿真与网络设备
 REPLAY_DEVICE="cuda:0"                     # 长期经验池设备, 可改为 cpu
-EVAL_DEVICE="cpu"                          # 独立评估设备, 可改为另一张 GPU
-NUM_ENVS=1024                                     # 并行仿真环境数  4096
+EVAL_DEVICE="cuda:0"                              # 独立评估设备, 可改为另一张 GPU
+NUM_ENVS=2048                                     # 并行仿真环境数  4096
 CONTROL_DT=0.02                            # 控制周期, 秒
 MAX_EPISODE_STEPS=1000                     # 一个训练回合最多控制步数
 SHOW_VIEWER=false                               # 训练是否显示 MuJoCo 窗口
@@ -49,6 +49,8 @@ CHECKPOINT_ROOT="checkpoints/supermimic"   # 新实验目录的根目录
 CHECKPOINT_EVERY=2000                           # 保存模型参数的轮数间隔
 CHECKPOINT_KEEP=2                               # 仅保留最近几个 checkpoint, 必须为正整数
 EVAL_EVERY=4000                                 # 评估当前策略的轮数间隔
+EVAL_MAX_STEPS=1500                             # 每回合评估上限, 50 Hz 下为 30 秒
+EVAL_EPISODES=20                                # 周期评估随机抽取的回合数, 最终评估顺序遍历全部动作
 LOG_EVERY=100                                   # W&B 指标记录间隔
 MEMORY_EVERY=100                                # 显存检查间隔
 MEMORY_LIMIT=0.95                                # 整卡占用比例上限, 0 表示仅记录
@@ -68,5 +70,5 @@ exec python -m supermimic.workflows.train \
     --history-length="$HISTORY_LENGTH" --goal-frames="$GOAL_FRAMES" --latent-dim="$LATENT_DIM" --wm-window="$WM_WINDOW" --horizon="$HORIZON" \
     --wm-updates="$WM_UPDATES" --wm-batch="$WM_BATCH" --policy-batch="$POLICY_BATCH" --learning-rate="$LEARNING_RATE" \
     --gamma="$GAMMA" --gae-lambda="$GAE_LAMBDA" --critic-epochs="$CRITIC_EPOCHS" --critic-minibatches="$CRITIC_MINIBATCHES" --lr-decay-iterations="$LR_DECAY_ITERATIONS" \
-    --iterations="$ITERATIONS" --checkpoint-root="$CHECKPOINT_ROOT" --checkpoint-every="$CHECKPOINT_EVERY" --checkpoint-keep="$CHECKPOINT_KEEP" --eval-every="$EVAL_EVERY" --log-every="$LOG_EVERY" \
+    --iterations="$ITERATIONS" --checkpoint-root="$CHECKPOINT_ROOT" --checkpoint-every="$CHECKPOINT_EVERY" --checkpoint-keep="$CHECKPOINT_KEEP" --eval-every="$EVAL_EVERY" --eval-max-steps="$EVAL_MAX_STEPS" --eval-episodes="$EVAL_EPISODES" --log-every="$LOG_EVERY" \
     --memory-every="$MEMORY_EVERY" --memory-limit="$MEMORY_LIMIT" --wandb-project="$WANDB_PROJECT" "${FLAGS[@]}"

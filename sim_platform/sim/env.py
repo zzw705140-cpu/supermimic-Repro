@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from collections import deque
 from dataclasses import dataclass, replace as copy_config
 import math
 from pathlib import Path
@@ -45,6 +46,7 @@ class RobotSimEnvConfig:
     show_viewer: bool = False      # 是否显示 MuJoCo 窗口, 训练与测评脚本均可选择
     viewer_env_id: int = 0         # 窗口显示哪个并行环境, 不影响其他环境的物理步进
     reference_offset_y: float = 1.0  # 蓝色参考机器人沿世界 y 轴的显示偏移, 单位为米
+    camera_pan_step: float = 0.1   # 点按或长按重复事件的相机地面平移距离, 单位为米
 
     # 参考帧, 回合长度, 奖励和随机化采样规则由上层任务配置负责.
 
@@ -61,6 +63,8 @@ class RobotSimEnvConfig:
             raise ValueError("env_spacing 必须为非负的有限数值")
         if not math.isfinite(self.reference_offset_y):
             raise ValueError("reference_offset_y 必须为有限数值")
+        if not math.isfinite(self.camera_pan_step) or self.camera_pan_step <= 0:
+            raise ValueError("camera_pan_step 必须为正的有限数值")
         device = torch.device(self.device)
         if device.type not in ("cpu", "cuda"):
             raise ValueError("仿真设备必须为 cpu 或 cuda")
@@ -155,6 +159,8 @@ class RobotSimEnv:
         self._viewer_closed = False
         self._reference_values = None
         self._reference_visible = False
+        self._viewer_pan_requests = deque()
+        self._viewer_key_callback = None
         self.sim = SimulationContext(sim_cfg)
         try:
             self._initialize_simulation()
@@ -274,6 +280,14 @@ class RobotSimEnv:
             return False
         with self._viewer.lock():
             self._sync_viewer_state()
+            # 回调仅入队; 在刷新线程持锁时移动相机, 避免键盘线程重复获取窗口锁.
+            while self._viewer_pan_requests:
+                sideways, forward = self._viewer_pan_requests.popleft()
+                camera = self._viewer.cam
+                angle, step = math.radians(camera.azimuth), self.config.camera_pan_step
+                camera.lookat[0] += step * (forward * math.cos(angle) + sideways * math.sin(angle))
+                camera.lookat[1] += step * (forward * math.sin(angle) - sideways * math.cos(angle))
+                camera.type = 0  # mjCAMERA_FREE, 保留高度、距离、方位角和俯仰角.
         self._viewer.sync()
         return self._viewer.is_running()
 
@@ -374,9 +388,39 @@ class RobotSimEnv:
             self._viewer.cam.elevation = -15.0
 
     def _on_viewer_key(self, keycode):
-        """窗口中按 P 键切换参考显示, 回调只修改开关, 场景刷新由 render 负责."""
+        """P 切换参考显示, 方向键支持点按和长按平移, 刷新由 render 负责."""
         if keycode in (ord("P"), ord("p")) and self._reference_values is not None:
             self._reference_visible = not self._reference_visible
+        # GLFW: 右 262, 左 263, 下 264, 上 265; 不修改机器人状态.
+        direction = {262: (1, 0), 263: (-1, 0), 264: (0, -1), 265: (0, 1)}.get(keycode)
+        if direction is not None:
+            self._enable_viewer_key_repeat()
+            self._viewer_pan_requests.append(direction)
+
+    def _enable_viewer_key_repeat(self):
+        """在窗口按键线程接入 GLFW 重复事件, 保留 MuJoCo 原有按键处理."""
+        if getattr(self, "_viewer_key_callback", None) is not None:
+            return
+        import glfw
+
+        # MuJoCo 的 key_callback 只有键码, 不转发 REPEAT; 此处只补方向键重复事件.
+        # 回调正在窗口线程执行, current context 就是该 MuJoCo 窗口, 不搜索其他窗口.
+        window = glfw.get_current_context()
+        if not window:
+            return
+
+        def key_event(window, key, scancode, action, mods):
+            """先保持原生快捷键行为, 再将方向键重复事件交给已有平移队列."""
+            if original:
+                original(window, key, scancode, action, mods)
+            if action == glfw.REPEAT and key in (glfw.KEY_LEFT, glfw.KEY_RIGHT, glfw.KEY_UP, glfw.KEY_DOWN):
+                self._on_viewer_key(key)
+
+        # Python GLFW 的公开 setter 不返回 MuJoCo 在 C++ 中注册的旧回调, 因此使用其原生绑定.
+        # 保存 C 回调引用, 避免被回收; 窗口异步关闭期间也继续保留它.
+        callback = glfw._GLFWkeyfun(key_event)
+        original = glfw._glfw.glfwSetKeyCallback(window, callback)
+        self._viewer_key_callback = (callback, original)
 
     def _sync_viewer_state(self):
         """只将所选环境的位姿搬到显示模型, 通过 mj_forward 更新几何, 不调用 mj_step."""
@@ -418,6 +462,7 @@ class RobotSimEnv:
         self._viewer_model = self._viewer_data = None
         self._reference_values = None
         self._reference_visible = False
+        self._viewer_pan_requests.clear()
         self._viewer_closed = True
 
     # ---------------------------------- 状态写入与刷新 ---------------------------------- #

@@ -235,13 +235,13 @@ def save_checkpoint(run_dir, agent, iteration, keep_last=2):
     return target
 
 
-def evaluate_checkpoint(checkpoint, motion_dir, device, show_viewer):
+def evaluate_checkpoint(checkpoint, motion_dir, device, show_viewer, *, mode="final", num_episodes=20, max_steps=1500, seed=0):
     """独立进程复用 eval.py 的评估函数, 避免创建第二个仿真上下文."""
     with tempfile.TemporaryDirectory(prefix="supermimic_eval_") as directory:
         result = Path(directory) / "result.json"
         command = [sys.executable, "-m", "supermimic.workflows.eval", "--checkpoint", str(checkpoint),
                    "--device", device, "--show-viewer", str(show_viewer).lower(), "--motion-dir", motion_dir,
-                   "--result-file", str(result)]
+                   "--result-file", str(result), "--mode", mode, "--num-episodes", str(num_episodes), "--max-steps", str(max_steps), "--seed", str(seed)]
         completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if completed.returncode:
             raise RuntimeError(f"评估进程失败:\n{completed.stdout}")
@@ -311,6 +311,8 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=2000)
     parser.add_argument("--checkpoint-keep", type=int, default=2)
     parser.add_argument("--eval-every", type=int, default=2000)
+    parser.add_argument("--eval-max-steps", type=int, default=1500)
+    parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--memory-every", type=int, default=100)
     parser.add_argument("--memory-limit", type=float, default=0.9, help="整卡占用阈值, 0 表示只记录")
@@ -319,7 +321,7 @@ def main():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="supermimic")
     args = parser.parse_args()
-    for name in ("num_envs", "iterations", "replay_steps", "warmup_steps", "wm_updates", "wm_batch", "policy_batch", "max_episode_steps", "checkpoint_every", "checkpoint_keep", "eval_every", "log_every", "memory_every"):
+    for name in ("num_envs", "iterations", "replay_steps", "warmup_steps", "wm_updates", "wm_batch", "policy_batch", "max_episode_steps", "checkpoint_every", "checkpoint_keep", "eval_every", "eval_max_steps", "eval_episodes", "log_every", "memory_every"):
         if getattr(args, name) <= 0:
             parser.error(f"{name} 必须为正整数")
     if not math.isfinite(args.utd) or args.utd <= 0 or not 0 <= args.memory_limit <= 1 or args.action_noise < 0:
@@ -398,9 +400,10 @@ def main():
                                 checkpoint = Path(directory) / "policy.ckpt"
                                 torch.save({"config": asdict(agent.config), "policy": agent.policy.state_dict()}, checkpoint)
                                 save_run_config(Path(directory), config)
-                            result = evaluate_checkpoint(checkpoint, args.motion_dir, args.eval_device, args.eval_viewer)
-                        print(f"第 {eval_count} 次测评 | 归一化回报: {result['normalized_return']:.4f}", flush=True)
-                        metrics.update({"eval/normalized_return": result["normalized_return"], "eval/failed_count": result["failed_count"]})
+                            mode = "final" if iteration == args.iterations else "training"
+                            result = evaluate_checkpoint(checkpoint, args.motion_dir, args.eval_device, args.eval_viewer, mode=mode, num_episodes=args.eval_episodes, max_steps=args.eval_max_steps, seed=args.seed + iteration)
+                        print(f"第 {eval_count} 次测评 | 归一化回报: {result['normalized_return']:.4f} | 成功率: {result['success_rate']:.1%}", flush=True)
+                        metrics.update({"eval/normalized_return": result["normalized_return"], "eval/failed_count": result["failed_count"], "eval/success_rate": result["success_rate"], "eval/num_episodes": result["num_episodes"], "eval/is_final": mode == "final"})
                         progress(iteration, args.iterations)
                     if logger is not None and (iteration % args.log_every == 0 or "eval/normalized_return" in metrics):
                         try:

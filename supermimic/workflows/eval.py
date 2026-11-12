@@ -61,14 +61,25 @@ def resolve_checkpoint(checkpoint: str, run_dir: str, root: str, task: str) -> P
 
 
 @torch.no_grad()
-def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = True, print_actions: bool = False) -> dict:
-    """逐段评估全部动作; 环境由调用方创建和关闭, 不更新策略或训练状态.
+def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, mode: str = "final", num_episodes: int = 20, max_steps: int = 1500, seed: int = 0, verbose: bool = True, print_actions: bool = False) -> dict:
+    """在独立单环境中评估策略, 不更新参数; 返回平均回报、成功率和回合记录.
 
-    每段从首帧开始, 无动作和观测噪声, 跟踪失败时结束; 分母始终为完整片段
-    最大回报, 与 vibed 的逐动作平均归一化回报一致. 环境必须是独立的单环境.
+    training 模式独立随机抽取 num_episodes 个动作, 允许重复; final 模式顺序遍历动作库.
+    每回合从首帧开始, 无动作和观测噪声, 最多 max_steps 步. 达到上限或动作末帧
+    且未失败即成功; 失败立即转下一回合. 回报分母为本回合计划长度的最大回报,
+    失败提前结束不缩短分母. 这与完整动作片段的论文评估口径不同.
     """
 
     motion = mdp.motion
+    if mode not in ("training", "final"):
+        raise ValueError("评估 mode 必须为 training 或 final")
+    for name, value in (("num_episodes", num_episodes), ("max_steps", max_steps)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} 必须为正整数")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("seed 必须为非负整数")
+    if motion.num_clips <= 0:
+        raise ValueError("动作库不能为空")
     if env.num_envs != 1:
         raise ValueError("逐动作评估需要 num_envs=1 的独立环境")
     if env.device != motion.device or next(policy.parameters()).device != motion.device:
@@ -81,8 +92,12 @@ def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = Tr
     training = policy.training
     policy.eval()
     results = []
+    # 使用独立 CPU 随机数生成器, 不改动训练或策略采样的随机数状态.
+    generator = torch.Generator().manual_seed(seed)
+    clips = torch.randint(motion.num_clips, (num_episodes,), generator=generator).tolist() if mode == "training" else list(range(motion.num_clips))
     try:
-        for index, name in enumerate(motion.names):
+        for episode, index in enumerate(clips, start=1):
+            name = motion.names[index]
             clip = torch.tensor([index], device=motion.device, dtype=torch.long)
             frame = torch.zeros(1, device=motion.device, dtype=torch.long)
             reference = motion.get_reference(clip, frame, include_body=False)
@@ -94,9 +109,12 @@ def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = Tr
             history = observation.unsqueeze(1).repeat(1, policy.config.history_length, 1)
             total, steps, failed = 0.0, 0, False
             length = int(motion.clip_lengths[index].item())
+            planned_steps = min(length - 1, max_steps)
+            if planned_steps <= 0:
+                raise ValueError(f"动作 {name} 至少需要两帧")
 
             # 环境每步推进一次, 最后一帧不再生成下一个动作.
-            for _ in range(length - 1):
+            for _ in range(planned_steps):
                 goal = mdp.goal_features(clip, frame)
                 action = policy.predict_actions(history, goal)[:, 0, :]
                 if verbose and print_actions:
@@ -116,19 +134,22 @@ def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = Tr
                 observation = mdp.observation(state, previous, clip, frame)
                 history = torch.cat((history[:, 1:], observation.unsqueeze(1)), dim=1)
 
-            normalized = total / ((length - 1) * mdp.max_step_reward)
-            result = {"name": name, "return": total, "normalized_return": normalized, "steps": steps, "failed": failed}
+            normalized = total / (planned_steps * mdp.max_step_reward)
+            reason = "failed" if failed else ("time_limit" if steps >= max_steps else "clip_end")
+            result = {"episode": episode, "clip_id": index, "name": name, "return": total, "normalized_return": normalized, "steps": steps, "planned_steps": planned_steps, "failed": failed, "success": not failed, "end_reason": reason}
             results.append(result)
             if verbose:
-                print(f"测评 {index + 1}/{motion.num_clips} | {name} | 失败: {str(failed).lower()} | 回报: {total:.4f} | 归一化回报: {normalized:.4f}", flush=True)
+                print(f"测评 {episode}/{len(clips)} | {name} | 成功: {str(not failed).lower()} | 步数: {steps}/{planned_steps} | 回报: {total:.4f} | 归一化回报: {normalized:.4f}", flush=True)
     finally:
         policy.train(training)
 
     mean = sum(item["normalized_return"] for item in results) / len(results)
     failed_count = sum(item["failed"] for item in results)
+    success_count = len(results) - failed_count
+    success_rate = success_count / len(results)
     if verbose:
-        print(f"测评平均归一化回报: {mean:.4f} | 失败动作: {failed_count}/{len(results)}", flush=True)
-    return {"normalized_return": mean, "failed_count": failed_count, "num_clips": len(results), "per_clip": results}
+        print(f"测评平均归一化回报: {mean:.4f} | 成功率: {success_rate:.1%} ({success_count}/{len(results)})", flush=True)
+    return {"mode": mode, "max_steps": max_steps, "normalized_return": mean, "failed_count": failed_count, "success_count": success_count, "success_rate": success_rate, "num_episodes": len(results), "num_clips": len(set(clips)), "per_clip": results}
 
 
 ##############################################################################
@@ -149,8 +170,15 @@ def main() -> None:
     parser.add_argument("--show-viewer", choices=("true", "false"), default="false")
     parser.add_argument("--print-actions", choices=("true", "false"), default="false")
     parser.add_argument("--reference-offset-y", type=float, default=1.0)
+    parser.add_argument("--camera-pan-step", type=float, default=0.1)
+    parser.add_argument("--mode", choices=("training", "final"), default="final")
+    parser.add_argument("--num-episodes", type=int, default=20)
+    parser.add_argument("--max-steps", type=int, default=1500)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--result-file", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.num_episodes <= 0 or args.max_steps <= 0 or args.seed < 0:
+        parser.error("num-episodes 和 max-steps 必须为正整数, seed 不能为负")
 
     checkpoint = resolve_checkpoint(args.checkpoint, args.run_dir, args.checkpoint_root, args.task)
     policy, algorithm_config = load_policy(checkpoint, args.device)
@@ -178,16 +206,16 @@ def main() -> None:
     kin = G1Kinematics(MJCF_PATH, G1_JOINT_NAMES, mdp_config.tracked_bodies, device=args.device)
     motion = MotionLib(args.motion_dir or None, control_dt=algorithm_config.control_dt, device=args.device, kinematics=kin)
     mdp = TrackingMDP(kin, motion, torch.tensor(default_joint_pos_list(), device=args.device), mdp_config)
-    env_config = RobotSimEnvConfig(num_envs=1, device=args.device, control_dt=algorithm_config.control_dt, show_viewer=args.show_viewer == "true", reference_offset_y=args.reference_offset_y)
+    env_config = RobotSimEnvConfig(num_envs=1, device=args.device, control_dt=algorithm_config.control_dt, show_viewer=args.show_viewer == "true", reference_offset_y=args.reference_offset_y, camera_pan_step=args.camera_pan_step)
     sim_config = make_sim_config(env_config)
     if not args.result_file:
         print(f"评估 checkpoint: {checkpoint}", flush=True)
         if env_config.show_viewer:
-            print("仿真窗口中按 P 键显示或隐藏蓝色参考机器人。", flush=True)
+            print("仿真窗口中按 P 切换蓝色参考机器人, 点按或按住方向键沿地面平移相机。", flush=True)
     with launch_simulation(sim_config):
         env = RobotSimEnv(env_config, sim_cfg=sim_config)
         try:
-            result = evaluate_policy(env, policy, mdp, verbose=not bool(args.result_file), print_actions=args.print_actions == "true")
+            result = evaluate_policy(env, policy, mdp, mode=args.mode, num_episodes=args.num_episodes, max_steps=args.max_steps, seed=args.seed, verbose=not bool(args.result_file), print_actions=args.print_actions == "true")
             if args.result_file:
                 Path(args.result_file).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         finally:
