@@ -119,6 +119,7 @@ class WorldModel(nn.Module):
         floor = torch.tensor((3e-3, 5e-3, 2e-2, 5e-2, 3e-3, 5e-2))
         self.register_buffer("error_floor", floor.repeat_interleave(torch.tensor((3, 3, 3, 3, 29, 29))))
 
+    # 整理输入
     def inputs(self, state, action, context):
         """状态特征 [...,71] + 动作 [...,29] + 内部归一化物理参数 [...,33] -> [...,133]."""
 
@@ -127,28 +128,36 @@ class WorldModel(nn.Module):
         for name, tensor, width in (("action", action, ACTION_DIM), ("context", context, CONTEXT_DIM)):
             if tensor.shape != leading + (width,) or tensor.device != features.device or tensor.dtype != features.dtype:
                 raise ValueError(f"{name} 必须与状态同设备同精度, 形状为 {leading + (width,)}")
+            
+        # 先通过 normalize_context(context) 对原始物理参数进行归一化，再沿最后一维拼接
         return torch.cat((features, action, normalize_context(context)), dim=-1)
 
     @staticmethod
+    # 用于计算从 state 到 next_state 的 70 维局部状态增量，供世界模型统计和误差计算使用。
     def targets(state, next_state):
-        """计算两状态间的局部增量 [...,70], 用于统计和状态误差, 不改变原始状态.
 
-        位移在原状态的水平朝向系表达, 旋转为原根部系中的旋转向量.
-        线速度和角速度增量在原根部系表达, 关节角和速度直接做差.
-        """
-
-        rotation = quaternion_to_matrix(state["root_quat"])
+        # 先把当前根部姿态的四元数转换成旋转矩阵，再构造两种逆变换
+        rotation   = quaternion_to_matrix(state["root_quat"])
+        # 把世界系向量转换到当前的水平朝向坐标系，只考虑水平朝向。
         heading_inverse = heading_matrix(rotation).transpose(-1, -2)
-        inverse = rotation.transpose(-1, -2)
+        # 把世界系向量转换到当前的根部坐标系，考虑完整姿态。
+        inverse    = rotation.transpose(-1, -2)
+
+        # 准备计算相对姿态的四元数。
         quaternion = F.normalize(state["root_quat"], dim=-1)
-        conjugate = torch.cat((-quaternion[..., :3], quaternion[..., 3:]), dim=-1)
+        conjugate  = torch.cat((-quaternion[..., :3], quaternion[..., 3:]), dim=-1)
+
+        # 计算六类增量，拼接成 70 维结果。
         return torch.cat(((heading_inverse @ (next_state["root_pos"] - state["root_pos"])[..., None]).squeeze(-1), quaternion_to_rotation_vector(quaternion_multiply(conjugate, next_state["root_quat"])), (inverse @ (next_state["root_lin_vel"] - state["root_lin_vel"])[..., None]).squeeze(-1), (inverse @ (next_state["root_ang_vel"] - state["root_ang_vel"])[..., None]).squeeze(-1), next_state["joint_pos"] - state["joint_pos"], next_state["joint_vel"] - state["joint_vel"]), dim=-1)
 
     @torch.no_grad()
+    # 用于根据真实交互数据，更新世界模型输入和状态增量的均值、方差统计，供归一化与反归一化使用。
     def update_statistics(self, data: Mapping):
         """接收单步 [N,...] 或批量真实转移, 显式更新输入和局部增量的统计."""
 
+        # 检查输入数据
         validate_replay_data(data, device=self.in_norm.mean.device)
+        # 更新 模型输入 和 状态增量 的统计量
         self.in_norm.update(self.inputs(data["state"], data["action"], data["context"]))
         self.out_norm.update(self.targets(data["state"], data["next_state"]))
 
@@ -158,16 +167,22 @@ class WorldModel(nn.Module):
         保留状态和动作的梯度; 参数冻结时仍可用于策略的多步反向传播.
         """
 
+        # 整理输入，通过网络预测标准化增量
         prediction = self.net(self.in_norm(self.inputs(state, action, context)))
-        increment = prediction * self.out_norm.std() + self.out_norm.mean
+        # 反标准化，并拆分六类状态增量
+        increment  = prediction * self.out_norm.std() + self.out_norm.mean
         position, orientation, linear, angular, joints, velocities = increment.split((3, 3, 3, 3, 29, 29), dim=-1)
-        rotation = quaternion_to_matrix(state["root_quat"])
+        # 计算当前旋转矩阵和下一姿态
+        rotation   = quaternion_to_matrix(state["root_quat"])
         quaternion = F.normalize(quaternion_multiply(state["root_quat"], rotation_vector_to_quaternion(orientation)), dim=-1)
+
+        # 将增量应用到当前状态，返回下一状态字典
         return {"root_pos": state["root_pos"] + (heading_matrix(rotation) @ position[..., None]).squeeze(-1), "root_quat": quaternion, "root_lin_vel": state["root_lin_vel"] + (rotation @ linear[..., None]).squeeze(-1), "root_ang_vel": state["root_ang_vel"] + (rotation @ angular[..., None]).squeeze(-1), "joint_pos": state["joint_pos"] + joints, "joint_vel": state["joint_vel"] + velocities}
 
     def forward(self, state, action, context):
         """支持标准 nn.Module 调用, 与 step 一样返回可微的六字段下一状态."""
 
+        # 将标准模型调用转交给 step，完成下一状态预测
         return self.step(state, action, context)
 
 
@@ -177,14 +192,48 @@ class WorldModel(nn.Module):
 
 
 class Policy(nn.Module):
-    """参考目标编码器和动作解码器, 输出统一动作序列接口.
+    """
+    策略网络架构：
+    
+    未来参考目标 goal
+    [B, 730]                         10 帧 × 每帧 73 维
+        ↓ RunningNorm
+    [B, 730]
+        ↓ Linear → ELU
+    [B, 2048]
+        ↓ Linear → ELU
+    [B, 1024]
+        ↓ Linear → ELU
+    [B, 512]                     历史观测 obs_history
+        ↓ Linear → ELU           [B, 10, 99]
+    [B, 256]                         ↓ RunningNorm
+        ↓ Linear → tanh          [B, 10, 99]
+    [B, 32]                          ↓ 展平最后两维
+    目标潜变量 latent              [B, 990]
+        │                             │
+        │                             │
+        └────────── 拼接 ─────────────┘
+                    ↓
+                [B, 1022]             32 + 990
+                    ↓ Linear → ELU
+                [B, 2048]
+                    ↓ Linear → ELU
+                [B, 1024]
+                    ↓ Linear → ELU
+                [B, 512]
+                    ↓ Linear → ELU
+                [B, 256]
+                    ↓ Linear
+                [B, 29]
+                    ↓ reshape
+                [B, 1, 29]
+                输出动作序列
 
-    输入: obs_history [...,L,99], goal [...,K*73], L/K 由配置决定.
-    输出: actions [...,C,29], 当前 C=1, workflows 取 actions[...,0,:] 执行一步.
-    结构: 目标 -> RunningNorm -> 编码器 -> tanh -> z [...,32];
-          历史 -> RunningNorm -> 展平 -> 与 z 拼接 -> 解码器 -> [...,C,29].
-    编码器和解码器隐藏层均为 (2048,1024,512,256), 使用 ELU, 不使用 LayerNorm.
+    输入: obs_history [...,L,99]   goal [...,K*73]
+    输出: actions     [...,C,29]
+
     policy_type 保留生成式后端的选择接口, 本版不假装实现 Diffusion 或 Flow Matching.
+    后续可以加入生成式模型表征策略分布来生成动作
     """
 
     def __init__(self, config: SuperMimicConfig | None = None):
@@ -196,39 +245,45 @@ class Policy(nn.Module):
             raise NotImplementedError("当前仅实现 policy_type='mlp', 生成式策略需接入对应网络和训练规则")
         if self.config.chunk_length != 1 or self.config.execute_steps != 1:
             raise NotImplementedError("当前按论文实现单步策略, chunk 接口已保留, 多步执行和学习规则尚未接入")
+        # 创建目标编码器和动作解码器
         self.goal_dim = self.config.goal_frames * GOAL_FRAME_DIM
-        self.encoder = MLP(self.goal_dim, self.config.policy_hidden_dims, self.config.latent_dim)
-        self.decoder = MLP(OBS_DIM * self.config.history_length + self.config.latent_dim, self.config.policy_hidden_dims, ACTION_DIM * self.config.chunk_length)
+        self.encoder  = MLP(self.goal_dim, self.config.policy_hidden_dims, self.config.latent_dim)
+        self.decoder  = MLP(OBS_DIM * self.config.history_length + self.config.latent_dim, self.config.policy_hidden_dims, ACTION_DIM * self.config.chunk_length)
+        # 缩小动作输出层的初始权重，并将偏置清零
         with torch.no_grad():
             self.decoder.net[-1].weight.mul_(0.01)
             self.decoder.net[-1].bias.zero_()
-        self.obs_norm = RunningNorm(OBS_DIM, self.config.norm_max_count)
+        # 分别创建历史观测和参考目标的归一化组件
+        self.obs_norm  = RunningNorm(OBS_DIM, self.config.norm_max_count)
         self.goal_norm = RunningNorm(self.goal_dim, self.config.norm_max_count)
 
     @torch.no_grad()
+    # 用于利用真实采集的观测和参考目标，更新两个归一化组件的统计量。
     def update_statistics(self, observation, goal):
         """用真实采集的单帧观测 [...,99] 和参考目标 [...,K*73] 更新统计, 不重复计数历史."""
 
         self.obs_norm.update(observation)
         self.goal_norm.update(goal)
 
+    # 将参考目标编码，与归一化后的历史观测拼接，再解码成动作序列。
     def predict_actions(self, obs_history, goal):
-        """目标 -> 编码器/tanh; 历史 -> 展平; 两者拼接 -> 解码器 -> 动作序列 [...,C,29].
-
-        前导批量维必须相同, 本函数不采样探索噪声, 不裁剪动作, 不保存动作队列.
-        """
 
         if obs_history.ndim < 2 or obs_history.shape[-2:] != (self.config.history_length, OBS_DIM):
             raise ValueError(f"obs_history 末两维必须为 ({self.config.history_length}, {OBS_DIM})")
         if goal.shape != obs_history.shape[:-2] + (self.goal_dim,):
             raise ValueError("goal 必须与观测历史具有相同前导批量维和正确目标维度")
+
+        # 归一化参考目标，并编码成有界的目标潜变量
         latent = torch.tanh(self.encoder(self.goal_norm(goal)))
+        # 归一化每帧观测，再将历史帧展开成一个向量
         history = self.obs_norm(obs_history).flatten(-2)
+        # 拼接目标潜变量和历史观测，通过解码器生成动作
         actions = self.decoder(torch.cat((latent, history), dim=-1))
+        # 将动作整理为统一的动作序列接口
         return actions.reshape(obs_history.shape[:-2] + (self.config.chunk_length, ACTION_DIM))
 
     def forward(self, obs_history, goal):
-        """标准 nn.Module 接口, 与 predict_actions 一样返回 [...,C,29], 保留策略梯度."""
+        """标准 nn.Module 接口, 与 predict_actions 一样返回 [...,C,29], 保留策略梯度，默认C为1 """
 
         return self.predict_actions(obs_history, goal)
 
@@ -239,11 +294,29 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """状态价值网络, 输入 MDP 特权特征和未来目标, 与策略不共享参数.
+    """
+    根据当前任务特征和未来参考目标，预测状态价值 V,与策略网络不共享参数。
 
-    feature_dim 由 workflows 从 mdp.critic_dim 传入, 默认跟踪 14 个部位时为 184.
-    结构: features [...,F] + goal [...,K*73] -> RunningNorm -> MLP(256,128) -> [...].
-    输出为无界状态价值 V, 不使用概率激活, 也不创建目标 Critic.
+    状态价值网络架构：
+
+    任务特征 features       未来目标 goal
+    [B, 184]                [B, 730]
+        └──────── 拼接 ────────┘
+                    ↓
+                [B, 914]
+                    ↓ RunningNorm
+                    ↓ Linear → ELU
+                [B, 256]
+                    ↓ Linear → ELU
+                [B, 128]
+                    ↓ Linear
+                [B, 1]
+                    ↓ squeeze(-1)
+                   [B]
+    状态价值网络, 输入 MDP 特权特征和未来目标, 与策略不共享参数.
+
+    默认跟踪 14 个部位时为 184.
+    输出一个价值标量价值 V, 输出层没有激活函数，也不创建目标 Critic.
     """
 
     def __init__(self, feature_dim: int, config: SuperMimicConfig | None = None):
@@ -253,6 +326,7 @@ class Critic(nn.Module):
         self.config = config or SuperMimicConfig()
         if isinstance(feature_dim, bool) or not isinstance(feature_dim, int) or feature_dim <= 0:
             raise ValueError("feature_dim 必须为正整数")
+        # 保存特征维度，计算目标维度，创建输入归一化器和 MLP
         self.feature_dim = feature_dim
         self.goal_dim = self.config.goal_frames * GOAL_FRAME_DIM
         self.norm = RunningNorm(feature_dim + self.goal_dim, self.config.norm_max_count)
@@ -263,6 +337,7 @@ class Critic(nn.Module):
 
         if features.shape[-1:] != (self.feature_dim,) or goal.shape != features.shape[:-1] + (self.goal_dim,):
             raise ValueError("Critic 特征和目标维度错误, 或前导批量维不一致")
+        # 沿最后一维拼接任务特征和未来目标
         return torch.cat((features, goal), dim=-1)
 
     def forward(self, features, goal):
@@ -274,15 +349,15 @@ class Critic(nn.Module):
 ##############################################################################
 #                         算法状态与梯度管理                                  #
 ##############################################################################
-
+# 负责管理世界模型、策略和 Critic 的学习规则、参数更新及优化器状态
 
 class SuperMimicAgent:
     """持有 workflows 已组装的网络与任务, 管理学习规则和优化器状态.
 
-    构造输入: world_model, policy, critic, mdp, 可选的同一份 SuperMimicConfig.
-    update_world_model 接收经验池采样的 windows [B,k,...] 和 bool mask [B,k].
-    update_policy 接收 ImaginedRollout.as_dict() 的可微轨迹, 不在内部进行预测展开.
-    prepare_critic_batch 接收同布局轨迹, 计算固定目标; update_critic 接收该批次.
+    update_world_model    长期经验池：接收经验池采样的 windows [B,k,...] 和 bool mask [B,k].
+    update_policy         短期想象：  接收 ImaginedRollout.as_dict() 的可微轨迹, 不在内部进行预测展开.
+    prepare_critic_batch  短期想象：  接收同布局轨迹, 计算固定目标; update_critic 接收该批次.
+    
     各 update 返回已经分离梯度的指标字典, 本类不写日志或磁盘文件.
 
     策略阶段用法:
@@ -297,6 +372,7 @@ class SuperMimicAgent:
     def __init__(self, world_model: WorldModel, policy: Policy, critic: Critic, mdp: TrackingMDP, config: SuperMimicConfig | None = None):
         """校验网络和任务配置的一致性, 创建三个独立 Adam 优化器, 不重新组装网络."""
 
+        # 保存配置，以及外部已经创建好的三个网络和 MDP
         self.config = config or world_model.config
         self.world_model, self.policy, self.critic, self.mdp = world_model, policy, critic, mdp
         if any(model.config != self.config for model in (world_model, policy, critic)):
@@ -311,57 +387,80 @@ class SuperMimicAgent:
         for model in (world_model, policy, critic):
             if any(tensor.device != self.device or (tensor.is_floating_point() and tensor.dtype != torch.float32) for tensor in (*model.parameters(), *model.buffers())):
                 raise ValueError("所有网络和统计量必须在同一设备并使用 float32, 请先由 workflows 调用 .to(device)")
-        self.wm_optimizer = torch.optim.Adam(world_model.parameters(), lr=self.config.learning_rate)
+
+        # 为世界模型、策略和 Critic 分别创建独立的 Adam 优化器
+        self.wm_optimizer     = torch.optim.Adam(world_model.parameters(), lr=self.config.learning_rate)
         self.policy_optimizer = torch.optim.Adam(policy.parameters(), lr=self.config.learning_rate, betas=self.config.policy_betas)
         self.critic_optimizer = torch.optim.Adam(critic.parameters(), lr=self.config.learning_rate)
+        # 初始化外层迭代编号、各网络更新次数和策略阶段标志
         self.iteration = 0
         self.updates = {"world_model": 0, "policy": 0, "critic": 0}
         self._policy_phase_active = False
 
     @contextmanager
+    # 在策略训练期间冻结世界模型和 Critic 的参数，同时保留梯度经过它们传回策略的路径，退出时恢复原设置。
     def policy_phase(self):
-        """在预测展开和策略反向传播期间固定模型与 Critic 参数, 退出时恢复原标志.
-
+        """
         这里不使用 no_grad, 以保留网络输出对状态和动作输入的导数.
-        上下文内不能更新归一化统计或另外两个优化器, 异常退出也会恢复参数标志.
+        进入策略阶段时冻结世界模型和 Critic 的参数, 退出时恢复 requires_grad.
+        该上下文管理器不允许嵌套使用, 以避免重复冻结和恢复参数, 也不允许在策略阶段更新归一化统计.
         """
 
+        # 禁止嵌套进入，收集待冻结参数并保存原来的梯度开关
         if self._policy_phase_active:
             raise RuntimeError("不能嵌套进入 policy_phase")
+        # 只收集世界模型和 Critic 的参数，策略参数保持可训练
         parameters = list(self.world_model.parameters()) + list(self.critic.parameters())
         original_flags = [parameter.requires_grad for parameter in parameters]
         self._policy_phase_active = True
+
+        # 清除残留梯度，冻结参数，然后执行 with 内的策略训练代码
         try:
             for parameter in parameters:
+                # 清除世界模型和 Critic 上一次训练留下的参数梯度
                 parameter.grad = None
+                # 关闭这些参数自身的梯度计算
                 parameter.requires_grad_(False)
             yield
+        # 无论正常结束还是发生异常，都恢复参数标志并退出策略阶段，不会让网络一直处于冻结状态
         finally:
             for parameter, flag in zip(parameters, original_flags):
                 parameter.requires_grad_(flag)
             self._policy_phase_active = False
 
+    # 用于根据当前迭代编号，按余弦曲线调整三个优化器的学习率，并记录迭代编号
     def set_iteration(self, iteration: int):
         """按 workflows 传入的迭代编号更新余弦学习率, 衰减结束后保持最低比例."""
 
         if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
             raise ValueError("iteration 必须为非负整数")
+
+        # 计算衰减进度和学习率比例，达到衰减终点后保持最低比例、
         progress = min(iteration / self.config.lr_decay_iterations, 1.0)
         ratio = self.config.min_lr_ratio + (1 - self.config.min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+        # 更新三个优化器所有参数组的学习率，并保存迭代编号
         for optimizer in (self.wm_optimizer, self.policy_optimizer, self.critic_optimizer):
             for group in optimizer.param_groups:
                 group["lr"] = self.config.learning_rate * ratio
         self.iteration = iteration
 
     @torch.no_grad()
+    # 在真实数据采集后，统一更新世界模型和策略的归一化统计量。
     def update_statistics(self, transition, observation, goal):
-        """采集后更新世界模型与策略的真实数据统计, 不从预测轨迹反复更新这些统计."""
+        """
+        采集真实数据后统一更新世界模型与策略的真实数据统计, 不从预测轨迹反复更新这些统计.
+        
+        世界模型更新输入与状态增量的统计；策略更新观测与参考目标的统计。这里没有更新 Critic 的统计。
+        """
 
         if self._policy_phase_active:
             raise RuntimeError("策略预测展开期间不能更新归一化统计")
+        # 分别更新世界模型和策略的统计量
+        
         self.world_model.update_statistics(transition)
         self.policy.update_statistics(observation, goal)
 
+    # 用于统一执行损失检查、反向传播、梯度裁剪和优化器更新，并返回训练指标。
     def _apply_update(self, optimizer, parameters, loss, *, clip_value=None):
         """共享反向传播和梯度裁剪规则, 发现非有限损失或梯度时停止且不更新参数."""
 
@@ -422,6 +521,7 @@ class SuperMimicAgent:
                 last_error = error.mean()
         return total / batch, last_error
 
+    # 用于对一批真实窗口执行一次世界模型参数更新，并返回训练指标。
     def update_world_model(self, windows: Mapping, mask: torch.Tensor):
         """对 workflows 采样的一批真实窗口执行一次模型更新, 不在这里访问经验池."""
 

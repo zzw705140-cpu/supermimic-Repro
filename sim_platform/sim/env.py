@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 
 import torch
+import warp as wp
+from newton import ModelFlags
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
@@ -95,6 +97,8 @@ class RobotSimEnv:
         step(action)         : float32 [N,29], 按 G1_JOINT_NAMES 排列的无量纲动作.
         reset(env_ids, state): 编号 [B], 六字段状态各为 [B,D], 按编号顺序逐行对应.
         env_ids=None         : 选中全部环境, state=None 使用机器人资源中的默认状态.
+        set_physical_parameters: 全部环境的摩擦 [N,1] 和躯干质心偏移 [N,3].
+        set_joint_offsets      : 指定环境的关节目标偏移 [B,29].
 
     输出:
         state / step / reset 均返回全部 N 个环境的六字段字典, 不返回奖励或结束标志.
@@ -169,8 +173,41 @@ class RobotSimEnv:
         self.default_joint_pos = self.robot.data.default_joint_pos.torch
         self.alpha = torch.tensor([action_scale(name) for name in G1_JOINT_NAMES], device=self.device, dtype=torch.float32)
         self._all_env_ids = torch.arange(self.num_envs, device=self.device)
+        self.joint_offsets = torch.zeros((self.num_envs, NUM_JOINTS), device=self.device)
+        self._torso_id = self.robot.find_bodies("torso_link")[0][0]
+        self._default_torso_com = self.robot.data.body_com_pos_b.torch[:, self._torso_id, :].clone()
 
     # ---------------------------------- 对外接口 ---------------------------------- #
+
+    @torch.no_grad()
+    def set_physical_parameters(self, friction: torch.Tensor, torso_com_offset: torch.Tensor):
+        """设置所有环境的摩擦 [N,1] 和躯干质心偏移 [N,3], 不推进物理时间.
+
+        偏移相对初始躯干质心, 摩擦写入机器人碰撞形状; 地面取采样下限 0.3.
+        调用方负责采样及记录参数, 本接口不改变状态或隐式生成随机数.
+        """
+        self._check_open()
+        self._check_tensor(friction, (self.num_envs, 1), "friction")
+        self._check_tensor(torso_com_offset, (self.num_envs, 3), "torso_com_offset")
+        if torch.any(friction < 0.3):
+            raise ValueError("摩擦系数不能小于地面摩擦 0.3")
+        manager = self.sim.backend_manager
+        model = manager.get_model()
+        shape_mu = wp.to_torch(model.shape_material_mu)
+        shape_body = wp.to_torch(model.shape_body)
+        robot_mu = wp.to_torch(self.robot._root_view.get_attribute("shape_material_mu", model)[:, 0])
+        shape_mu[shape_body < 0] = 0.3
+        robot_mu[:] = friction
+        manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        self.robot.set_coms_index(coms=(self._default_torso_com + torso_com_offset).unsqueeze(1), body_ids=[self._torso_id])
+
+    @torch.no_grad()
+    def set_joint_offsets(self, env_ids, offsets: torch.Tensor):
+        """为指定环境设置关节目标偏移 [B,29], B 与编号行顺序一致."""
+        self._check_open()
+        ids = self._resolve_env_ids(env_ids)
+        self._check_tensor(offsets, (ids.numel(), NUM_JOINTS), "offsets")
+        self.joint_offsets[ids] = offsets
 
     def state(self) -> dict[str, torch.Tensor]:
         """读取当前六字段状态, 不推进时间, 不额外 clone 保存快照."""
@@ -378,7 +415,7 @@ class RobotSimEnv:
     def _apply_action(self, action):
         """沿用已验证的动作映射, PD 参数由 robot.py 提供, 不额外裁剪动作."""
 
-        target = self.default_joint_pos + self.alpha * action
+        target = self.default_joint_pos + self.joint_offsets + self.alpha * action
         self.robot.actuators.target_command.set_position_index(value=target)
 
     def _advance_simulation(self):
