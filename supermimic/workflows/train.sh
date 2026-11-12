@@ -44,7 +44,7 @@ CRITIC_MINIBATCHES=4                       # 每次遍历划分的批次数
 LR_DECAY_ITERATIONS=250000                 # 学习率衰减轮数
 
 # ------------------------- 训练、评估与保存 ------------------------- #
-ITERATIONS=4                                # 目标训练轮数 12700
+ITERATIONS=16000                                # 目标训练轮数 12700
 CHECKPOINT_ROOT="checkpoints/supermimic"   # 新实验目录的根目录
 CHECKPOINT_EVERY=2000                           # 保存模型参数的轮数间隔
 CHECKPOINT_KEEP=2                               # 仅保留最近几个 checkpoint, 必须为正整数
