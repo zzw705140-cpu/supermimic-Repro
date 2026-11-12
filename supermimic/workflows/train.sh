@@ -25,7 +25,7 @@ UTD=0.4                                    # 每次训练调度对应的更新/�
 ACTION_NOISE=0.1                           # 真实环境动作的高斯探索噪声标准差
 
 # ------------------------- 世界模型、策略与 Critic ------------------------- #
-WM_HIDDEN="2048,2048,2048"                 # 世界模型各隐藏层宽度
+WM_HIDDEN="1024,1024,1024"                      # 世界模型各隐藏层宽度  2048,2048,2048
 POLICY_HIDDEN="2048,1024,512,256"          # 策略编码器与解码器隐藏层宽度
 CRITIC_HIDDEN="256,128"                    # Critic 隐藏层宽度
 HISTORY_LENGTH=10                          # 策略观测历史帧数
@@ -33,9 +33,9 @@ GOAL_FRAMES=10                             # 未来参考目标帧数
 LATENT_DIM=32                              # 参考目标潜变量维度
 WM_WINDOW=8                                # 世界模型训练窗口长度
 HORIZON=32                                 # 每条短期预测轨迹长度
-WM_UPDATES=10                              # 每轮世界模型更新次数
-WM_BATCH=2048                                  # 世界模型每次采样的窗口数  2048  32
-POLICY_BATCH=4096                              # 每轮短期预测轨迹数量  4096  32
+WM_UPDATES=5                                     # 每轮世界模型更新次数   10
+WM_BATCH=2048                                     # 世界模型每次采样的窗口数  2048  32
+POLICY_BATCH=2048                                 # 每轮短期预测轨迹数量  4096  32
 LEARNING_RATE=0.0002                       # 三个网络的初始学习率
 GAMMA=0.99                                 # 奖励折扣系数
 GAE_LAMBDA=0.95                            # Critic 回报目标的 lambda
@@ -51,7 +51,7 @@ CHECKPOINT_KEEP=2                               # 仅保留最近几个 checkpoi
 EVAL_EVERY=4000                                 # 评估当前策略的轮数间隔
 LOG_EVERY=100                                   # W&B 指标记录间隔
 MEMORY_EVERY=100                                # 显存检查间隔
-MEMORY_LIMIT=0.9                                # 整卡占用比例上限, 0 表示仅记录
+MEMORY_LIMIT=0.95                                # 整卡占用比例上限, 0 表示仅记录
 WANDB=true                                 # 是否启用在线 W&B
 WANDB_PROJECT="supermimic"                 # 项目名称, 账户使用本机登录信息
 
