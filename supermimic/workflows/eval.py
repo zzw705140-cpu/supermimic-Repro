@@ -85,7 +85,10 @@ def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = Tr
         for index, name in enumerate(motion.names):
             clip = torch.tensor([index], device=motion.device, dtype=torch.long)
             frame = torch.zeros(1, device=motion.device, dtype=torch.long)
-            state = env.reset(clip.new_zeros(1), motion.get_reference(clip, frame, include_body=False))
+            reference = motion.get_reference(clip, frame, include_body=False)
+            if env.config.show_viewer:
+                env.set_reference_state(reference)
+            state = env.reset(clip.new_zeros(1), reference)
             previous = torch.zeros((1, 29), device=motion.device, dtype=state["joint_pos"].dtype)
             observation = mdp.observation(state, previous, clip, frame)
             history = observation.unsqueeze(1).repeat(1, policy.config.history_length, 1)
@@ -98,6 +101,9 @@ def evaluate_policy(env, policy: Policy, mdp: TrackingMDP, *, verbose: bool = Tr
                 action = policy.predict_actions(history, goal)[:, 0, :]
                 if verbose and print_actions:
                     print(f"动作 {name} 第 {steps + 1} 步: {action[0].tolist()}", flush=True)
+                if env.config.show_viewer:
+                    # step 内部会刷新窗口, 先提交即将执行到的 t+1 参考帧.
+                    env.set_reference_state(motion.get_reference(clip, frame + 1, include_body=False))
                 state = env.step(action)
                 frame = frame + 1
                 reward = mdp.reward(state, clip, frame, action, previous)
@@ -142,6 +148,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-viewer", choices=("true", "false"), default="false")
     parser.add_argument("--print-actions", choices=("true", "false"), default="false")
+    parser.add_argument("--reference-offset-y", type=float, default=1.0)
     parser.add_argument("--result-file", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -171,10 +178,12 @@ def main() -> None:
     kin = G1Kinematics(MJCF_PATH, G1_JOINT_NAMES, mdp_config.tracked_bodies, device=args.device)
     motion = MotionLib(args.motion_dir or None, control_dt=algorithm_config.control_dt, device=args.device, kinematics=kin)
     mdp = TrackingMDP(kin, motion, torch.tensor(default_joint_pos_list(), device=args.device), mdp_config)
-    env_config = RobotSimEnvConfig(num_envs=1, device=args.device, control_dt=algorithm_config.control_dt, show_viewer=args.show_viewer == "true")
+    env_config = RobotSimEnvConfig(num_envs=1, device=args.device, control_dt=algorithm_config.control_dt, show_viewer=args.show_viewer == "true", reference_offset_y=args.reference_offset_y)
     sim_config = make_sim_config(env_config)
     if not args.result_file:
         print(f"评估 checkpoint: {checkpoint}", flush=True)
+        if env_config.show_viewer:
+            print("仿真窗口中按 P 键显示或隐藏蓝色参考机器人。", flush=True)
     with launch_simulation(sim_config):
         env = RobotSimEnv(env_config, sim_cfg=sim_config)
         try:

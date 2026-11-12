@@ -44,6 +44,7 @@ class RobotSimEnvConfig:
     env_spacing: float = 2.5       # 并行环境原点间距, 单位为米
     show_viewer: bool = False      # 是否显示 MuJoCo 窗口, 训练与测评脚本均可选择
     viewer_env_id: int = 0         # 窗口显示哪个并行环境, 不影响其他环境的物理步进
+    reference_offset_y: float = 1.0  # 蓝色参考机器人沿世界 y 轴的显示偏移, 单位为米
 
     # 参考帧, 回合长度, 奖励和随机化采样规则由上层任务配置负责.
 
@@ -58,6 +59,8 @@ class RobotSimEnvConfig:
             raise ValueError("control_dt 必须为正的有限数值")
         if not math.isfinite(self.env_spacing) or self.env_spacing < 0:
             raise ValueError("env_spacing 必须为非负的有限数值")
+        if not math.isfinite(self.reference_offset_y):
+            raise ValueError("reference_offset_y 必须为有限数值")
         device = torch.device(self.device)
         if device.type not in ("cpu", "cuda"):
             raise ValueError("仿真设备必须为 cpu 或 cuda")
@@ -150,6 +153,8 @@ class RobotSimEnv:
         self._viewer = None
         self._viewer_model = self._viewer_data = None
         self._viewer_closed = False
+        self._reference_values = None
+        self._reference_visible = False
         self.sim = SimulationContext(sim_cfg)
         try:
             self._initialize_simulation()
@@ -272,6 +277,19 @@ class RobotSimEnv:
         self._viewer.sync()
         return self._viewer.is_running()
 
+    @torch.no_grad()
+    def set_reference_state(self, state: Mapping[str, torch.Tensor]):
+        """接收上层当前参考帧的六字段 [N,D], 仅缓存所选环境的显示位姿.
+
+        不选取参考帧、不写入物理状态; 无窗口时跳过, P 键切换蓝色参考机器人.
+        """
+        self._check_open()
+        if not self.config.show_viewer or self._viewer_closed:
+            return
+        reference = self._validate_state(state, self.num_envs)
+        index = self.config.viewer_env_id
+        self._reference_values = torch.cat((reference["root_pos"][index], reference["root_quat"][index], reference["joint_pos"][index])).detach().cpu().numpy()
+
     def close(self):
         """释放本环境持有的仿真和窗口资源, 重复调用无副作用."""
 
@@ -312,6 +330,7 @@ class RobotSimEnv:
         """首次显示时加载独立 MJCF 和地面视觉资源, 不修改原始模型文件. 打开 MuJoCo 窗口并设置视角"""
 
         import xml.etree.ElementTree as ET
+        from copy import deepcopy
         import mujoco
         import mujoco.viewer
 
@@ -322,21 +341,42 @@ class RobotSimEnv:
             if target is None:
                 target = ET.SubElement(root, section.tag)
             target.extend(section)
+        # 副本仅属于显示模型, 不进入 Isaac Lab 的物理场景.
+        world = root.find("worldbody")
+        ghost = deepcopy(world.find("body"))
+        for element in ghost.iter():
+            if "name" in element.attrib:
+                element.set("name", "reference_" + element.get("name"))
+            if element.tag == "geom":
+                element.set("contype", "0")
+                element.set("conaffinity", "0")
+                element.set("group", "2")
+                element.set("rgba", "0.25 0.65 1.0 0.35")
+                element.attrib.pop("material", None)
+        world.append(ghost)
         self._viewer_model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
         self._viewer_data = mujoco.MjData(self._viewer_model)
         free_ids = [i for i in range(self._viewer_model.njnt) if self._viewer_model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE]
-        if len(free_ids) != 1:
-            raise ValueError("显示模型必须恰好有一个浮动根部")
+        if len(free_ids) != 2:
+            raise ValueError("显示模型必须包含策略与参考机器人两个浮动根部")
         self._viewer_root_address = int(self._viewer_model.jnt_qposadr[free_ids[0]])
+        self._reference_root_address = int(self._viewer_model.jnt_qposadr[free_ids[1]])
         # 按名称映射显示关节, 不假定 MJCF 与 Isaac Lab 内部的存储顺序相同.
         self._viewer_joint_addresses = [int(self._viewer_model.joint(name).qposadr[0]) for name in G1_JOINT_NAMES]
+        self._reference_joint_addresses = [int(self._viewer_model.joint("reference_" + name).qposadr[0]) for name in G1_JOINT_NAMES]
         self._sync_viewer_state()
-        self._viewer = mujoco.viewer.launch_passive(self._viewer_model, self._viewer_data)
+        self._viewer = mujoco.viewer.launch_passive(self._viewer_model, self._viewer_data, key_callback=self._on_viewer_key)
         with self._viewer.lock():
+            self._viewer.opt.geomgroup[2] = 0
             self._viewer.cam.lookat[:] = [0.0, 0.0, 0.7]
             self._viewer.cam.distance = 3.0
             self._viewer.cam.azimuth = 135.0
             self._viewer.cam.elevation = -15.0
+
+    def _on_viewer_key(self, keycode):
+        """窗口中按 P 键切换参考显示, 回调只修改开关, 场景刷新由 render 负责."""
+        if keycode in (ord("P"), ord("p")) and self._reference_values is not None:
+            self._reference_visible = not self._reference_visible
 
     def _sync_viewer_state(self):
         """只将所选环境的位姿搬到显示模型, 通过 mj_forward 更新几何, 不调用 mj_step."""
@@ -352,6 +392,15 @@ class RobotSimEnv:
         # Isaac Lab 使用 xyzw, MuJoCo 浮动关节使用 wxyz.
         self._viewer_data.qpos[address + 3:address + 7] = values[[6, 3, 4, 5]]
         self._viewer_data.qpos[self._viewer_joint_addresses] = values[7:]
+        if self._reference_values is not None:
+            reference = self._reference_values
+            address = self._reference_root_address
+            self._viewer_data.qpos[address:address + 3] = reference[:3]
+            self._viewer_data.qpos[address + 1] += self.config.reference_offset_y
+            self._viewer_data.qpos[address + 3:address + 7] = reference[[6, 3, 4, 5]]
+            self._viewer_data.qpos[self._reference_joint_addresses] = reference[7:]
+        if self._viewer is not None:
+            self._viewer.opt.geomgroup[2] = int(self._reference_visible and self._reference_values is not None)
         mujoco.mj_forward(self._viewer_model, self._viewer_data)
 
     def _close_viewer(self):
@@ -367,6 +416,8 @@ class RobotSimEnv:
             self._viewer.close()
         self._viewer = None
         self._viewer_model = self._viewer_data = None
+        self._reference_values = None
+        self._reference_visible = False
         self._viewer_closed = True
 
     # ---------------------------------- 状态写入与刷新 ---------------------------------- #

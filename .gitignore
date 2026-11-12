@@ -1,3 +1,5 @@
+checkpoints/
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
@@ -36,3 +38,4 @@ ENV/
 
 要求/
 dependencies
+

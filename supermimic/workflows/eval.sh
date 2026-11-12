@@ -6,7 +6,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # ------------------------- 模型来源 ------------------------- #
-CHECKPOINT_PATH=""                           # 指定 checkpoint 文件, 留空时自动查找
+
+# 指定 checkpoint 文件, 留空时自动查找
+CHECKPOINT_PATH="checkpoints/supermimic/tracking__supermimic__20261112_142308/epoch_000004.ckpt"
 RUN_DIR=""                                   # 指定实验目录, 与 CHECKPOINT_PATH 二选一
 CHECKPOINT_ROOT="checkpoints/supermimic"     # 自动查找实验的根目录
 TASK_NAME="tracking"                         # 自动查找实验时使用的任务名称
@@ -16,6 +18,7 @@ MOTION_DIR=""                                # 动作数据目录, 留空使用�
 DEVICE="cuda:0"                              # 仿真与策略设备, 也可设置为 cpu
 SHOW_VIEWER=false                            # true 时打开 MuJoCo 预览窗口
 PRINT_ACTIONS=false                          # true 时输出策略每步的 29 维动作
+REFERENCE_OFFSET_Y=1.0                       # 蓝色参考机器人的侧向距离, 窗口中按 P 切换显示
 
 exec python -m supermimic.workflows.eval \
     --checkpoint="$CHECKPOINT_PATH" \
@@ -25,4 +28,5 @@ exec python -m supermimic.workflows.eval \
     --motion-dir="$MOTION_DIR" \
     --device="$DEVICE" \
     --show-viewer="$SHOW_VIEWER" \
-    --print-actions="$PRINT_ACTIONS"
+    --print-actions="$PRINT_ACTIONS" \
+    --reference-offset-y="$REFERENCE_OFFSET_Y"

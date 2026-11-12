@@ -39,7 +39,7 @@ clip_id、frame_id、episode_step: int64
 terminated、truncated          : bool
 
 时间对应:
-action[t,n] 将 state[t,n] 推进为 next_state[t,n].
+action[t,n] 将 state[t,n] 推进为 next_state[t,n]. 
 reward[t,n]、terminated[t,n]、truncated[t,n] 对应这次转移.
 clip_id[t,n]、frame_id[t,n] 描述动作执行前的参考进度.
 环境编号由第 1 维 n 表示, 无需每条记录重复保存 env_id.

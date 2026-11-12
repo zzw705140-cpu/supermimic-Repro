@@ -1,4 +1,6 @@
 # 评估
+conda activate supermimic
+cd "/home/xinyu/project/model-based RL/supermimic-Repro"
 bash supermimic/workflows/eval.sh
 
 

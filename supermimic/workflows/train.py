@@ -215,8 +215,10 @@ def train_imagination(agent, replay, batch_size):
 ##############################################################################
 
 
-def save_checkpoint(run_dir, agent, iteration):
-    """先原子保存, 成功后仅清理本实验最旧的周期模型文件."""
+def save_checkpoint(run_dir, agent, iteration, keep_last=2):
+    """先原子保存, 成功后仅保留本实验最近 keep_last 个模型文件."""
+    if isinstance(keep_last, bool) or not isinstance(keep_last, int) or keep_last <= 0:
+        raise ValueError("keep_last 必须为正整数")
     target = run_dir / f"epoch_{iteration:06d}.ckpt"
     temporary = None
     try:
@@ -228,7 +230,7 @@ def save_checkpoint(run_dir, agent, iteration):
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     checkpoints = sorted(run_dir.glob("epoch_*.ckpt"), key=lambda path: int(path.stem.split("_")[-1]))
-    for old in checkpoints[:-2]:
+    for old in checkpoints[:-keep_last]:
         old.unlink()
     return target
 
@@ -307,6 +309,8 @@ def main():
     parser.add_argument("--task", default="tracking")
     parser.add_argument("--motion-dir", default="")
     parser.add_argument("--checkpoint-every", type=int, default=2000)
+    parser.add_argument("--checkpoint-keep", type=int, default=2)
+    parser.add_argument("--eval-every", type=int, default=2000)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--memory-every", type=int, default=100)
     parser.add_argument("--memory-limit", type=float, default=0.9, help="整卡占用阈值, 0 表示只记录")
@@ -315,7 +319,7 @@ def main():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="supermimic")
     args = parser.parse_args()
-    for name in ("num_envs", "iterations", "replay_steps", "warmup_steps", "wm_updates", "wm_batch", "policy_batch", "max_episode_steps", "checkpoint_every", "log_every", "memory_every"):
+    for name in ("num_envs", "iterations", "replay_steps", "warmup_steps", "wm_updates", "wm_batch", "policy_batch", "max_episode_steps", "checkpoint_every", "checkpoint_keep", "eval_every", "log_every", "memory_every"):
         if getattr(args, name) <= 0:
             parser.error(f"{name} 必须为正整数")
     if not math.isfinite(args.utd) or args.utd <= 0 or not 0 <= args.memory_limit <= 1 or args.action_noise < 0:
@@ -380,13 +384,21 @@ def main():
                         reset_gpu_memory_peak(args.device)
                         if args.memory_limit and memory["used_fraction"] >= args.memory_limit:
                             print("\n显存占用达到设定阈值, 保存模型后结束训练。", flush=True)
-                            save_checkpoint(run_dir, agent, iteration)
+                            save_checkpoint(run_dir, agent, iteration, keep_last=args.checkpoint_keep)
                             break
+                    checkpoint = None
                     if iteration % args.checkpoint_every == 0 or iteration == args.iterations:
-                        checkpoint = save_checkpoint(run_dir, agent, iteration)
+                        checkpoint = save_checkpoint(run_dir, agent, iteration, keep_last=args.checkpoint_keep)
+                    if iteration % args.eval_every == 0 or iteration == args.iterations:
                         eval_count += 1
                         print(f"\n第 {eval_count} 次测评", flush=True)
-                        result = evaluate_checkpoint(checkpoint, args.motion_dir, args.eval_device, args.eval_viewer)
+                        # 仅评估时用临时策略快照, 不增加持久 checkpoint 或影响保留数量.
+                        with tempfile.TemporaryDirectory(prefix=".evaluation_", dir=run_dir) as directory:
+                            if checkpoint is None:
+                                checkpoint = Path(directory) / "policy.ckpt"
+                                torch.save({"config": asdict(agent.config), "policy": agent.policy.state_dict()}, checkpoint)
+                                save_run_config(Path(directory), config)
+                            result = evaluate_checkpoint(checkpoint, args.motion_dir, args.eval_device, args.eval_viewer)
                         print(f"第 {eval_count} 次测评 | 归一化回报: {result['normalized_return']:.4f}", flush=True)
                         metrics.update({"eval/normalized_return": result["normalized_return"], "eval/failed_count": result["failed_count"]})
                         progress(iteration, args.iterations)
